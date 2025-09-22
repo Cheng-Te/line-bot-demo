@@ -23,7 +23,7 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 # 以 groupId 為 key 的投票狀態
 state = {}  # { group_id: {"topic": str, "voted": set(user_id)} }
 
-@app.post("/webhook")
+@app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     signature = request.headers.get('X-Line-Signature', '')
     body = request.get_data(as_text=True)

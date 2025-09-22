@@ -1,5 +1,6 @@
 from flask import Flask, request
 import os, json, re, requests
+from linebot.models import JoinEvent
 
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
@@ -51,6 +52,25 @@ def webhook():
     return "OK", 200
 
 # ---------------- 指令處理 ----------------
+
+# 當被邀請進入群組時，觸發這個事件
+@handler.add(JoinEvent)
+def handle_join(event: JoinEvent):
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(
+            "大家好 👋 我是「催票鞭刑人」！\n"
+            "用以下指令就能開始投票：\n"
+            "/poll 主題 | 選項1, 選項2\n"
+            "/vote 1 3（可多選）\n"
+            "/status /stats 查看進度\n"
+            "/remind /close 催票或結算\n"
+            "/remind-names 名稱1 名稱2（純文字點名）\n"
+            "沒發言的同學記得先打個字或輸入 /join，之後提醒才 @ 得到你！"
+        )
+    )
+
+
 @handler.add(MessageEvent, message=TextMessage)
 def handle_text(event: MessageEvent):
     src = event.source

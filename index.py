@@ -329,25 +329,31 @@ def push_text(group_id: str, text: str):
                   data=json.dumps(payload, ensure_ascii=False).encode("utf-8"))
 
 def push_with_mentions(group_id: str, prefix: str, user_ids):
-    # 建文字 + 計算每個 @ 的 index/length
+    # 組文字 + 計算每個 @ 的位置
     body_text = prefix + " "
-    spans = []  # 收集 (index, length, userId)
+    entities = []
     for i, uid in enumerate(user_ids, start=1):
         tag = f"@user{i}"
-        index = len(body_text)
+        start = len(body_text)
         length = len(tag)
-        body_text += tag + ("、" if i != len(user_ids) else "")
-        spans.append({"index": index, "length": length, "userId": uid})
+        body_text += tag
+        if i != len(user_ids):
+            body_text += "、"
 
-    # ✅ 使用 Text v2 的 entities.mention（取代舊的 "mention": {...} 寫法）
+        # ✅ Text v2 正確格式：entities 是「陣列」，每一個都有 type=mention
+        entities.append({
+            "type": "mention",
+            "index": start,
+            "length": length,
+            "userId": uid
+        })
+
     payload = {
         "to": group_id,
         "messages": [{
             "type": "text",
             "text": body_text,
-            "entities": {
-                "mention": spans
-            }
+            "entities": entities
         }]
     }
     headers = {

@@ -80,6 +80,7 @@ def handle_text(event: MessageEvent):
             "/remind                         提醒並 @『已知但未投』的人\n"
             "/close                          結算並 @『已知但未投』的人，清空本輪\n"
             "/join                           登記自己（安靜成員輸入一次即可）\n"
+            "/remind-names 名稱1 名稱2 ...  純文字點名備用（不做真正 @）\n"
         ))
         return
 
@@ -204,6 +205,32 @@ def handle_text(event: MessageEvent):
             detail = "、".join(by_option[i-1]) if by_option[i-1] else "（無）"
             lines.append(f"{i}. {opt} － {c} 票 〔{detail}〕")
         line_bot_api.reply_message(event.reply_token, TextSendMessage("\n".join(lines)))
+        return
+
+        # /remind-names 名稱1 名稱2 ...   ← 不需要有投票也能用
+    if text.startswith("/remind-names"):
+        # 允許用空白或逗號分隔
+        # 例：/remind-names 小明 小美   或   /remind-names 小明,小美,小王
+        raw = text[len("/remind-names"):].strip()
+        parts = re.split(r"[,\s]+", raw) if raw else []
+        names = [p for p in parts if p]
+
+        if not names:
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage("請在指令後面接上名字：/remind-names 小明 小美（可用空白或逗號分隔）")
+            )
+            return
+
+        # 若目前有投票，就順便帶出主題；沒有也能獨立使用
+        topic = (state.get(group_id, {}) or {}).get("topic")
+        names_text = "、".join(names)
+        if topic:
+            body = f"{names_text} —— {topic} 不投票是想被我鞭嗎"
+        else:
+            body = f"{names_text} 不投票是想被我鞭嗎"
+
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(body))
         return
 
     # /remind：只 @『已知但未投』的人（分批送）
@@ -342,13 +369,13 @@ def push_with_mentions(group_id: str, prefix: str, user_ids):
         if i != len(user_ids):
             body_text += "、"
 
-        # v1 寫法（舊）：mention.mentionees
+        # v1（舊）：mention.mentionees
         v1_mentionees.append({
             "index": index,
             "length": length,
             "userId": uid
         })
-        # v2 寫法（新）：entities array
+        # v2（新）：entities array
         v2_entities.append({
             "type": "mention",
             "index": index,
@@ -361,7 +388,7 @@ def push_with_mentions(group_id: str, prefix: str, user_ids):
         "messages": [{
             "type": "text",
             "text": body_text,
-            # ✅ 同時帶 v1 & v2，誰被支援就吃誰
+            # 同時帶 v1 & v2，誰被支援就吃誰
             "mention": { "mentionees": v1_mentionees },
             "entities": v2_entities
         }]
@@ -379,7 +406,6 @@ def push_with_mentions(group_id: str, prefix: str, user_ids):
     if resp.status_code >= 300:
         print("Push mention failed:", resp.status_code, resp.text)
     else:
-        # 方便排查：把 payload 關鍵資訊印出
         print("Push mention ok:", {"text": body_text, "count": len(user_ids)})
 
 def push_with_mentions_batched(group_id, prefix, user_ids, batch_size=20):

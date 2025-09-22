@@ -1,5 +1,5 @@
 from flask import Flask, request
-import os, json, requests, re
+import os, json, re, requests
 
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
@@ -17,18 +17,22 @@ def hello():
 
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 LINE_CHANNEL_TOKEN  = os.getenv("LINE_CHANNEL_TOKEN")
-REMIND_SECRET       = os.getenv("REMIND_SECRET")  # 可留空；若要外部排程打 /remind-all 再設定
 
 line_bot_api = LineBotApi(LINE_CHANNEL_TOKEN)
 handler      = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# ---------------- 投票狀態（記憶體） ----------------
+# ---------------- 狀態 ----------------
+# 每個群的投票狀態（記憶體）
 # state[group_id] = {
 #   "topic": str,
 #   "options": [str, ...],
-#   "voted": { user_id: set([index, ...]) }
+#   "voted": { user_id: set([optIndex, ...]) }   # 0-based index
 # }
 state = {}
+
+# 已知成員：凡在群內發過言或輸入 /join 的人
+# known[group_id] = set(user_id)
+known = {}
 
 # ---------------- Webhook ----------------
 @app.route("/webhook", methods=["GET", "POST"])
@@ -61,51 +65,64 @@ def handle_text(event: MessageEvent):
     user_id  = src.user_id
     text     = event.message.text.strip()
 
+    # 記錄已知成員（發過言的人）
+    known.setdefault(group_id, set()).add(user_id)
+
     # /help
     if text in ("/help", "help", "指令"):
         line_bot_api.reply_message(event.reply_token, TextSendMessage(
             "👉 指令：\n"
-            "/poll 主題 | 選項1, 選項2, 選項3  開新投票（自訂主題與選項）\n"
-            "/vote <選項序號(可多個)>      投票（例：/vote 1 或 /vote 1 3）\n"
-            "/unvote <序號>                取消某個選項（例：/unvote 2）\n"
-            "/status                       目前統計＋未投人數\n"
-            "/stats                        詳細統計（各選項人數）\n"
-            "/remind                       進行中提醒並 @ 未投的人\n"
-            "/close                        結算並 @ 未投的人，並清空本輪\n"
-            "小技巧：建立投票會附上快速按鈕，點一下就能投票。\n"
+            "/poll 主題 | 選項1, 選項2, ...  開新投票（支援半形|或全形｜）\n"
+            "/vote <序號(可多個)>            投票（例：/vote 1 或 /vote 1 3）\n"
+            "/unvote <序號(可多個)>          取消已選（例：/unvote 2）\n"
+            "/status                         目前進度（已投人數）\n"
+            "/stats                          詳細統計（含誰投了哪些選項）\n"
+            "/remind                         提醒並 @『已知但未投』的人\n"
+            "/close                          結算並 @『已知但未投』的人，清空本輪\n"
+            "/join                           登記自己（安靜成員輸入一次即可）\n"
         ))
         return
 
-    # /poll 主題 | 選項1, 選項2, 選項3
+    # /join：讓安靜成員自助註冊
+    if text == "/join":
+        known.setdefault(group_id, set()).add(user_id)
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(
+            "已登記你在這輪投票中的身分。之後可被提醒（@）到～"
+        ))
+        return
+
+    # /poll 主題 | 選項1, 選項2, ...
     if text.startswith("/poll"):
         topic, options = parse_poll_command(text)
         if not options:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(
-                "格式範例：\n/poll 午餐要吃什麼？ | 便當, 麵, 火鍋"
+                "格式範例：\n/poll 測試投票 | 9/1, 9/2, 9/3\n"
+                "（注意：請用半形逗號 , 分隔；分隔符可用半形 | 或全形 ｜）"
             ))
             return
         state[group_id] = {"topic": topic or "未命名主題", "options": options, "voted": {}}
 
-        # 建立快速按鈕（每個選項一顆，點擊會送出 /vote <index>）
+        # Quick Reply（單次點選）
         buttons = []
         for i, opt in enumerate(options, start=1):
             buttons.append(QuickReplyButton(action=MessageAction(label=f"{i}. {opt}", text=f"/vote {i}")))
-        qr = QuickReply(items=buttons[:13])  # Quick Reply 上限 13
+        qr = QuickReply(items=buttons[:13])  # 上限 13
 
+        tip = "（多選請用指令：例如 `/vote 1 3`；沒發言的同學請輸入 `/join` 後才提醒得到你）"
         line_bot_api.reply_message(event.reply_token, [
             TextSendMessage(
-                text=f"🗳️ 開新投票：{state[group_id]['topic']}\n選項：\n" + "\n".join(
-                    [f"{i+1}. {o}" for i, o in enumerate(options)]
-                ) + "\n\n請點快速按鈕或輸入 `/vote <序號>` 投票",
+                text=f"🗳️ 開新投票：{state[group_id]['topic']}\n選項：\n" +
+                     "\n".join([f"{i+1}. {o}" for i, o in enumerate(options)]) +
+                     f"\n\n請點快速按鈕或輸入 `/vote <序號>` 投票\n{tip}",
                 quick_reply=qr
             )
         ])
         return
 
-    # /vote 1 或 /vote 1 3（多選）
+    # /vote 1 或 /vote 1 3
     if text.startswith("/vote"):
         if group_id not in state:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage("目前沒有進行中的投票。先用 `/poll` 開始一輪吧！"))
+            line_bot_api.reply_message(event.reply_token, TextSendMessage("目前沒有進行中的投票。"))
             return
         idxs = parse_indices(text)
         if not idxs:
@@ -114,13 +131,11 @@ def handle_text(event: MessageEvent):
 
         poll = state[group_id]
         max_idx = len(poll["options"])
-        # 過濾合法序號
         picked = {i for i in idxs if 1 <= i <= max_idx}
         if not picked:
             line_bot_api.reply_message(event.reply_token, TextSendMessage("選項序號超出範圍。"))
             return
 
-        # 多選：累積到使用者的 set
         voted_map = poll["voted"]
         prev = voted_map.get(user_id, set())
         newset = set(prev) | {i-1 for i in picked}  # 轉 0-based
@@ -148,7 +163,9 @@ def handle_text(event: MessageEvent):
                 removed.add(i)
         poll["voted"][user_id] = chosen
         if removed:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(f"🗑️ 已取消：{', '.join(map(str, sorted(removed)))}"))
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(
+                f"🗑️ 已取消：{', '.join(map(str, sorted(removed)))}"
+            ))
         else:
             line_bot_api.reply_message(event.reply_token, TextSendMessage("沒有可取消的選項。"))
         return
@@ -159,101 +176,119 @@ def handle_text(event: MessageEvent):
             line_bot_api.reply_message(event.reply_token, TextSendMessage("目前沒有進行中的投票。"))
             return
         poll = state[group_id]
-        all_ids = get_all_group_member_ids(group_id)
-        non_voters = calc_non_voters(all_ids, poll["voted"])
+        voters_count = len([uid for uid, picks in poll["voted"].items() if picks])
         msg = (
             f"🗳️ {poll['topic']}\n"
-            f"已投：{len(poll['voted'])} / 全部：{len(all_ids)}（未投：{len(non_voters)}）"
+            f"已投：{voters_count} 人（已知成員：{len(known.get(group_id, set()))}）"
         )
         line_bot_api.reply_message(event.reply_token, TextSendMessage(msg))
         return
 
-    # /stats 詳細統計
+    # /stats（含誰投了哪些選項；用遮罩的 userId 顯示）
     if text == "/stats":
         if group_id not in state:
             line_bot_api.reply_message(event.reply_token, TextSendMessage("目前沒有進行中的投票。"))
             return
         poll = state[group_id]
         counts = tally_counts(poll["options"], poll["voted"])
+
+        # 反查各選項有哪些人投
+        by_option = [[] for _ in poll["options"]]
+        for uid, picks in poll["voted"].items():
+            for idx in picks:
+                if 0 <= idx < len(by_option):
+                    by_option[idx].append(mask_uid(uid))
+
         lines = [f"📊 {poll['topic']} 統計："]
         for i, (opt, c) in enumerate(zip(poll["options"], counts), start=1):
-            lines.append(f"{i}. {opt} － {c} 票")
+            detail = "、".join(by_option[i-1]) if by_option[i-1] else "（無）"
+            lines.append(f"{i}. {opt} － {c} 票 〔{detail}〕")
         line_bot_api.reply_message(event.reply_token, TextSendMessage("\n".join(lines)))
         return
 
-    # /remind（不中止投票，@ 未投）
+    # /remind：只 @『已知但未投』的人（分批送）
     if text == "/remind":
         if group_id not in state:
             line_bot_api.reply_message(event.reply_token, TextSendMessage("目前沒有進行中的投票。"))
             return
         poll = state[group_id]
-        all_ids = get_all_group_member_ids(group_id)
-        non_voters = calc_non_voters(all_ids, poll["voted"])
+        known_ids = known.get(group_id, set())
+        voters   = {uid for uid, picks in poll["voted"].items() if picks}
+        non_voters = sorted([uid for uid in known_ids if uid not in voters])
+
         if not non_voters:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage("目前沒有未投的人 👍"))
-        else:
-            push_with_mentions(group_id, f"不投票是想被我鞭嗎 —— {poll['topic']} 提醒：", non_voters)
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(
+                "目前沒有可提醒的未投人（或尚無已知成員）。"
+            ))
+            return
+
+        push_with_mentions_batched(
+            group_id,
+            f"不投票是想被我鞭嗎 —— {poll['topic']} 提醒：",
+            non_voters,
+            batch_size=20
+        )
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(
+            f"已提醒 {len(non_voters)} 位已知未投的人。"
+        ))
         return
 
-    # /close（結算並 @ 未投，清空）
+    # /close：結算 + @ 已知未投；清空本輪
     if text == "/close":
         if group_id not in state:
             line_bot_api.reply_message(event.reply_token, TextSendMessage("目前沒有進行中的投票。"))
             return
         poll = state[group_id]
-        all_ids = get_all_group_member_ids(group_id)
-        non_voters = calc_non_voters(all_ids, poll["voted"])
+        counts = tally_counts(poll["options"], poll["voted"])
 
         # 統計訊息
-        counts = tally_counts(poll["options"], poll["voted"])
+        by_option = [[] for _ in poll["options"]]
+        for uid, picks in poll["voted"].items():
+            for idx in picks:
+                if 0 <= idx < len(by_option):
+                    by_option[idx].append(mask_uid(uid))
+
         result_lines = [f"📦 {poll['topic']} 結算："]
         for i, (opt, c) in enumerate(zip(poll["options"], counts), start=1):
-            result_lines.append(f"{i}. {opt} － {c} 票")
+            detail = "、".join(by_option[i-1]) if by_option[i-1] else "（無）"
+            result_lines.append(f"{i}. {opt} － {c} 票 〔{detail}〕")
         line_bot_api.reply_message(event.reply_token, TextSendMessage("\n".join(result_lines)))
 
-        # @ 未投
+        # @ 已知未投
+        known_ids = known.get(group_id, set())
+        voters    = {uid for uid, picks in poll["voted"].items() if picks}
+        non_voters = sorted([uid for uid in known_ids if uid not in voters])
         if non_voters:
-            push_with_mentions(group_id, f"不投票是想被我鞭嗎 —— {poll['topic']} 截止提醒：", non_voters)
+            push_with_mentions_batched(
+                group_id,
+                f"不投票是想被我鞭嗎 —— {poll['topic']} 截止提醒：",
+                non_voters,
+                batch_size=20
+            )
         else:
-            push_text(group_id, "🎉 全員完成投票，太讚了！")
+            push_text(group_id, "🎉 已知成員皆完成投票，太讚了！")
 
+        # 清掉本輪（可視需求是否保留 known）
         del state[group_id]
         return
 
-    # 其它訊息不回（避免干擾）
+    # 其他訊息不處理
     return
-
-# ---------------- 外部排程（可選）：提醒所有群 ----------------
-@app.get("/remind-all")
-def remind_all():
-    # 若要開放外部排程（cron-job.org）打這個端點，請在 Render 設 REMIND_SECRET
-    if REMIND_SECRET and request.args.get("key") != REMIND_SECRET:
-        return "forbidden", 403
-
-    # 對所有有進行中投票的群，@ 未投
-    seen = 0
-    for gid, poll in list(state.items()):
-        all_ids = get_all_group_member_ids(gid)
-        non_voters = calc_non_voters(all_ids, poll["voted"])
-        if non_voters:
-            push_with_mentions(gid, f"不投票是想被我鞭嗎 —— {poll['topic']} 例行提醒：", non_voters)
-            seen += 1
-    return f"ok groups={seen}", 200
 
 # ---------------- 工具方法 ----------------
 def parse_poll_command(text: str):
-    """
-    /poll 主題 | 選項1, 選項2, 選項3
-    """
+    """支援半形|與全形｜，逗號請用半形 ,"""
     m = re.match(r"^/poll\s*(.*)$", text, flags=re.I)
     if not m:
         return None, []
     payload = m.group(1).strip()
+    # 全形｜轉半形|
+    payload = payload.replace("｜", "|")
     topic, options_part = None, ""
     if "|" in payload:
         topic, options_part = [p.strip() for p in payload.split("|", 1)]
     else:
-        # 沒給 | 選項，嘗試只用逗號當分隔
+        # 沒給 |，嘗試用第一個逗號前當主題
         parts = [p.strip() for p in payload.split(",")]
         if len(parts) >= 2:
             topic = parts[0]
@@ -261,33 +296,16 @@ def parse_poll_command(text: str):
         else:
             return payload, []
     options = [o.strip() for o in options_part.split(",") if o.strip()]
-    # 去重、保留順序
-    seen = set()
-    uniq = []
+    # 去重保序
+    seen, uniq = set(), []
     for o in options:
         if o not in seen:
             uniq.append(o); seen.add(o)
     return topic, uniq
 
 def parse_indices(text: str):
-    # 從 "/vote 1 3" 或 "/unvote 2" 抽出數字序號
     nums = re.findall(r"\d+", text)
     return [int(n) for n in nums]
-
-def get_all_group_member_ids(group_id: str):
-    ids, start = [], None
-    while True:
-        res = line_bot_api.get_group_member_ids(group_id, start)
-        ids.extend(res.member_ids)
-        if res.next is None:
-            break
-        start = res.next
-    return ids
-
-def calc_non_voters(all_ids, voted_map):
-    # 未投：沒出現在 voted_map 的人，或 set 為空
-    voters = {uid for uid, picks in voted_map.items() if picks}
-    return [uid for uid in all_ids if uid not in voters]
 
 def tally_counts(options, voted_map):
     counts = [0] * len(options)
@@ -296,6 +314,12 @@ def tally_counts(options, voted_map):
             if 0 <= idx < len(options):
                 counts[idx] += 1
     return counts
+
+def mask_uid(uid: str):
+    # 遮罩顯示用：U123456…abcd
+    if not uid or len(uid) < 8:
+        return uid
+    return f"{uid[:6]}…{uid[-4:]}"
 
 def push_text(group_id: str, text: str):
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_CHANNEL_TOKEN}"}
@@ -328,6 +352,11 @@ def push_with_mentions(group_id: str, prefix: str, user_ids):
                          data=json.dumps(payload, ensure_ascii=False).encode("utf-8"))
     if resp.status_code >= 300:
         print("Push mention failed:", resp.status_code, resp.text)
+
+def push_with_mentions_batched(group_id, prefix, user_ids, batch_size=20):
+    for i in range(0, len(user_ids), batch_size):
+        batch = user_ids[i:i+batch_size]
+        push_with_mentions(group_id, prefix, batch)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))

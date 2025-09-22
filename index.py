@@ -329,27 +329,36 @@ def push_text(group_id: str, text: str):
                   data=json.dumps(payload, ensure_ascii=False).encode("utf-8"))
 
 def push_with_mentions(group_id: str, prefix: str, user_ids):
+    # 建文字 + 計算每個 @ 的 index/length
     body_text = prefix + " "
-    mentionees = []
+    spans = []  # 收集 (index, length, userId)
     for i, uid in enumerate(user_ids, start=1):
         tag = f"@user{i}"
         index = len(body_text)
         length = len(tag)
         body_text += tag + ("、" if i != len(user_ids) else "")
-        mentionees.append({"index": index, "length": length, "userId": uid})
+        spans.append({"index": index, "length": length, "userId": uid})
 
+    # ✅ 使用 Text v2 的 entities.mention（取代舊的 "mention": {...} 寫法）
     payload = {
         "to": group_id,
         "messages": [{
             "type": "text",
             "text": body_text,
-            "mention": {"mentionees": mentionees}
+            "entities": {
+                "mention": spans
+            }
         }]
     }
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_CHANNEL_TOKEN}"}
-    resp = requests.post("https://api.line.me/v2/bot/message/push",
-                         headers=headers,
-                         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {LINE_CHANNEL_TOKEN}"
+    }
+    resp = requests.post(
+        "https://api.line.me/v2/bot/message/push",
+        headers=headers,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    )
     if resp.status_code >= 300:
         print("Push mention failed:", resp.status_code, resp.text)
 

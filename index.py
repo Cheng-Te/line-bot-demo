@@ -331,19 +331,27 @@ def push_text(group_id: str, text: str):
 def push_with_mentions(group_id: str, prefix: str, user_ids):
     # 組文字 + 計算每個 @ 的位置
     body_text = prefix + " "
-    entities = []
+    v1_mentionees = []
+    v2_entities   = []
+
     for i, uid in enumerate(user_ids, start=1):
-        tag = f"@user{i}"
-        start = len(body_text)
+        tag = f"@user{i}"              # 畫面上看到的佔位文字
+        index = len(body_text)
         length = len(tag)
         body_text += tag
         if i != len(user_ids):
             body_text += "、"
 
-        # ✅ Text v2 正確格式：entities 是「陣列」，每一個都有 type=mention
-        entities.append({
+        # v1 寫法（舊）：mention.mentionees
+        v1_mentionees.append({
+            "index": index,
+            "length": length,
+            "userId": uid
+        })
+        # v2 寫法（新）：entities array
+        v2_entities.append({
             "type": "mention",
-            "index": start,
+            "index": index,
             "length": length,
             "userId": uid
         })
@@ -353,9 +361,12 @@ def push_with_mentions(group_id: str, prefix: str, user_ids):
         "messages": [{
             "type": "text",
             "text": body_text,
-            "entities": entities
+            # ✅ 同時帶 v1 & v2，誰被支援就吃誰
+            "mention": { "mentionees": v1_mentionees },
+            "entities": v2_entities
         }]
     }
+
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {LINE_CHANNEL_TOKEN}"
@@ -367,6 +378,9 @@ def push_with_mentions(group_id: str, prefix: str, user_ids):
     )
     if resp.status_code >= 300:
         print("Push mention failed:", resp.status_code, resp.text)
+    else:
+        # 方便排查：把 payload 關鍵資訊印出
+        print("Push mention ok:", {"text": body_text, "count": len(user_ids)})
 
 def push_with_mentions_batched(group_id, prefix, user_ids, batch_size=20):
     for i in range(0, len(user_ids), batch_size):
